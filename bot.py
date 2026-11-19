@@ -248,7 +248,7 @@ def lun_good(it: dict) -> bool:
     return "новобуд" in low or "жк" in low
 
 
-def scan_lun(seen: set, found: list) -> None:
+def scan_lun(seen: set, found: list) -> int:
     ids = set()
     for page in range(1, LUN_PAGES + 1):
         url = "https://lun.ua/rent/lviv/flats-odnokimnatni" + (f"?page={page}" if page > 1 else "")
@@ -268,6 +268,7 @@ def scan_lun(seen: set, found: list) -> None:
                 seen.update({it["id"], it["group"]})
                 found.append(it)
     print(f"ЛУН: {len(ids)} оголошень")
+    return len(ids)
 
 
 # ---- ТЕЛЕГРАМ-КАНАЛИ ----------------------------------------------------------
@@ -305,9 +306,10 @@ def tg_one_room(text: str) -> bool:
     return bool(re.search(r"\b1[\s-]*(?:но)?[\s-]*кім|однокімнат|1к\b|1-к\b|смарт|studio|студі", t))
 
 
-def scan_tg(seen: set, found: list) -> None:
+def scan_tg(seen: set, found: list) -> dict:
+    res = {}
     for ch in TG_CHANNELS:
-        before, total = None, 0
+        before, total, on_page = None, 0, 0
         for _ in range(TG_MAX_PAGES):
             url = f"https://t.me/s/{ch}" + (f"?before={before}" if before else "")
             html = fetch(url)
@@ -318,6 +320,7 @@ def scan_tg(seen: set, found: list) -> None:
             posts = soup.select(".tgme_widget_message[data-post]")
             if not posts:
                 break
+            on_page += len(posts)
             ids = []
             all_seen = True
             for p in posts:
@@ -354,12 +357,48 @@ def scan_tg(seen: set, found: list) -> None:
                 break
             before = min(ids)
         print(f"Телеграм @{ch}: {total} нових постів")
+        res[f"Телеграм @{ch}"] = on_page
+    return res
+
+
+# ---- ПЕРЕВІРКА, ЧИ ДЖЕРЕЛА ПРАЦЮЮТЬ -------------------------------------------
+STATUS_FILE = Path(__file__).with_name("status.json")
+FAILS_BEFORE_ALERT = 2   # скільки запусків поспіль має бути 0, щоб написати (захист від разового збою)
+
+
+def health(counts: dict) -> None:
+    st = json.loads(STATUS_FILE.read_text() or "{}") if STATUS_FILE.exists() else {}
+    for src, n in counts.items():
+        rec = st.get(src, {"fails": 0, "alerted": False})
+        if n > 0:
+            if rec["alerted"]:
+                send(f"✅ {src} знову працює ({n} оголошень).")
+            rec = {"fails": 0, "alerted": False}
+        else:
+            rec["fails"] += 1
+            if rec["fails"] >= FAILS_BEFORE_ALERT and not rec["alerted"]:
+                why = "помилка" if n < 0 else "0 оголошень"
+                send(f"⚠️ {src} не відповідає ({why}, {rec['fails']} перевірки поспіль). "
+                     f"Квартири звідти зараз не приходять — скажи Claude, щоб подивився.")
+                rec["alerted"] = True
+        st[src] = rec
+    STATUS_FILE.write_text(json.dumps(st, ensure_ascii=False, indent=1))
+
+
+def safe(fn, *args, default=-1):
+    try:
+        return fn(*args)
+    except Exception as e:  # одне джерело зламалось — інші працюють далі
+        print(f"ПОМИЛКА в {getattr(fn, '__name__', fn)}: {e!r}")
+        return default
 
 
 def main() -> None:
     seen = set(json.loads(SEEN_FILE.read_text())) if SEEN_FILE.exists() else set()
     first_run = not seen
     found = []
+    counts = {}
+    rieltor_total = 0
     for name, cid in COMPLEXES.items():
         items, ids = [], set()
         for page in range(1, 4):           # сайт сортує не за датою, тому до 3 сторінок
@@ -376,6 +415,7 @@ def main() -> None:
             if len(new) < 20:
                 break
         print(f"{name}: {len(items)} оголошень")
+        rieltor_total += len(items)
         for it in items:
             if it["id"] in seen:
                 continue
@@ -410,9 +450,15 @@ def main() -> None:
                 if good(it):
                     found.append(it)
     print(f"Загальний список: {len(city_ids)} оголошень")
+    counts["rieltor (ЖК)"] = rieltor_total
+    counts["rieltor (вулиці)"] = len(city_ids)
 
-    scan_lun(seen, found)
-    scan_tg(seen, found)
+    counts["ЛУН"] = safe(scan_lun, seen, found)
+    tg = safe(scan_tg, seen, found, default=None)
+    if tg is None:
+        counts.update({f"Телеграм @{ch}": -1 for ch in TG_CHANNELS})
+    else:
+        counts.update(tg)
 
     found.sort(key=lambda x: (not x["no_fee"], x["usd"]))
     if first_run and found:
@@ -421,7 +467,19 @@ def main() -> None:
         send(fmt(it))
     print(f"Нових підходящих: {len(found)}")
     SEEN_FILE.write_text(json.dumps(sorted(seen)))
+    health(counts)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        st = json.loads(STATUS_FILE.read_text() or "{}") if STATUS_FILE.exists() else {}
+        rec = st.get("бот", {"fails": 0, "alerted": False})
+        rec["fails"] += 1
+        if rec["fails"] >= FAILS_BEFORE_ALERT and not rec["alerted"]:
+            send(f"⚠️ Бот квартир падає з помилкою: {e!r}. Скажи Claude, щоб подивився.")
+            rec["alerted"] = True
+        st["бот"] = rec
+        STATUS_FILE.write_text(json.dumps(st, ensure_ascii=False, indent=1))
+        raise
