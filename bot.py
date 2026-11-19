@@ -162,12 +162,18 @@ def send(msg: str) -> None:
 
 def fmt(it: dict) -> str:
     fee = "✅ без комісії" if it["no_fee"] else "комісія: уточнити"
+    if it.get("owner"):
+        fee += " · 👤 власник"
     snippet = it["text"]
     # короткий шматок опису після дати
     m = re.search(r"(сьогодні|вчора|\d+ (?:дн|тиж|міс)\S*\s*тому)\s*(.*)", snippet)
     desc = (m.group(2) if m else "")[:220]
+    if not desc and it["complex"] == "ЛУН":
+        desc = it["text"].split(it["street"], 1)[-1].strip()[:220] if it["street"] else it["text"][:220]
     title = it["complex"]
-    if title == "Львів":
+    if title == "ЛУН":
+        title = f"{it['street']} (через ЛУН, {it['site']})"
+    elif title == "Львів":
         addr = re.search(r"([А-ЯІЇЄҐ][а-яіїєґ'’\- ]+ (?:вул|просп|пл)\.,?\s*[\w\-/]*)", it["text"])
         title = (addr.group(1) if addr else "Львів") + (f" ({it['zk_name']})" if it.get("zk_name") else "")
     return (
@@ -177,6 +183,86 @@ def fmt(it: dict) -> str:
         f"{desc}…\n"
         f"{it['url']}"
     )
+
+
+# ---- ЛУН (lun.ua) ------------------------------------------------------------
+LUN_PAGES = 30          # сторінок загального списку 1-кімнатних Львова на ЛУН (24 на сторінці)
+
+
+def lun_cards(html: str) -> list[dict]:
+    """Дістає картки оголошень з даних сторінки ЛУН (Next.js)."""
+    parts = [json.loads('"' + m.group(1) + '"')
+             for m in re.finditer(r'self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)', html)]
+    s = "".join(parts)
+    out, dec = {}, json.JSONDecoder()
+    for m in re.finditer(r'\{"id":\d+,"groupId"', s):
+        try:
+            o, _ = dec.raw_decode(s, m.start())
+        except ValueError:
+            continue
+        if "urlRaw" in o:
+            out[o["id"]] = o
+    return list(out.values())
+
+
+def lun_item(o: dict) -> dict:
+    cur = (o.get("currency") or "usd").lower()
+    price = o.get("price") or 0
+    usd = round(price / UAH_PER_USD) if cur == "uah" else round(price * USD_PER_EUR) if cur == "eur" else price
+    sym = {"usd": "$", "uah": "грн", "eur": "€"}.get(cur, cur)
+    url = o.get("urlRaw") or ""
+    rid = re.search(r"rieltor\.ua/.*/view/(\d+)", url)
+    text = " ".join(str(x) for x in (o.get("geo"), o.get("header"), o.get("text")) if x)
+    return {
+        "id": rid.group(1) if rid else f"lun{o.get('groupId') or o['id']}",
+        "group": f"lun{o.get('groupId') or o['id']}",
+        "url": url,
+        "complex": "ЛУН",
+        "text": text,
+        "rooms1": o.get("roomCount") == 1,
+        "usd": usd if price else None,
+        "price_raw": f"{price:,} {sym}/міс".replace(",", " "),
+        "area": o.get("areaTotal") or "?",
+        "floor": f"{o.get('floor')} з {o.get('floorCount')}",
+        "street": o.get("header") or "",
+        "no_fee": "без комісії" in text.lower() or "без посередник" in text.lower(),
+        "owner": bool(o.get("isOwner")),
+        "year": o.get("builtYear"),
+        "site": (o.get("site") or {}).get("displayName", ""),
+    }
+
+
+def lun_good(it: dict) -> bool:
+    if not it["rooms1"] or it["usd"] is None or not (MIN_USD <= it["usd"] <= MAX_USD):
+        return False
+    low = it["text"].lower()
+    if any(w in low for w in EXCLUDE_WORDS) or not on_my_street(it["text"]):
+        return False
+    if it["year"]:
+        return it["year"] >= MIN_BUILD_YEAR
+    return "новобуд" in low or "жк" in low
+
+
+def scan_lun(seen: set, found: list) -> None:
+    ids = set()
+    for page in range(1, LUN_PAGES + 1):
+        url = "https://lun.ua/rent/lviv/flats-odnokimnatni" + (f"?page={page}" if page > 1 else "")
+        html = fetch(url)
+        time.sleep(5)
+        if not html:
+            break
+        new = [lun_item(o) for o in lun_cards(html)]
+        new = [it for it in new if it["group"] not in ids]
+        if not new:
+            break
+        for it in new:
+            ids.add(it["group"])
+            if it["id"] in seen or it["group"] in seen:
+                continue
+            if lun_good(it):
+                seen.update({it["id"], it["group"]})
+                found.append(it)
+    print(f"ЛУН: {len(ids)} оголошень")
 
 
 def main() -> None:
@@ -233,6 +319,8 @@ def main() -> None:
                 if good(it):
                     found.append(it)
     print(f"Загальний список: {len(city_ids)} оголошень")
+
+    scan_lun(seen, found)
 
     found.sort(key=lambda x: (not x["no_fee"], x["usd"]))
     if first_run and found:
