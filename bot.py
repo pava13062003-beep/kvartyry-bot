@@ -171,6 +171,11 @@ def fmt(it: dict) -> str:
     if not desc and it["complex"] == "ЛУН":
         desc = it["text"].split(it["street"], 1)[-1].strip()[:220] if it["street"] else it["text"][:220]
     title = it["complex"]
+    if title == "TG":
+        desc = it["text"].replace("\n", " ")[:300]
+        return (f"📢 {it['site']} — {it['street']}\n≈${it['usd']}\n"
+                + ("✅ без комісії" if it["no_fee"] else ("👤 власник" if it.get("owner") else "від агенції/невідомо"))
+                + f"\n{desc}…\n{it['url']}")
     if title == "ЛУН":
         title = f"{it['street']} (через ЛУН, {it['site']})"
     elif title == "Львів":
@@ -265,6 +270,92 @@ def scan_lun(seen: set, found: list) -> None:
     print(f"ЛУН: {len(ids)} оголошень")
 
 
+# ---- ТЕЛЕГРАМ-КАНАЛИ ----------------------------------------------------------
+TG_CHANNELS = ["orendakvartyr_ua"]
+TG_MAX_PAGES = 5        # скільки сторінок назад гортати (≈20 постів на сторінку)
+# Назви ЖК, які шукати в тексті постів (крім вулиць)
+TG_ZK = ["парус", "safe town", "сейф таун", "helga", "хельга", "ренуар", "місто трав",
+         "фамілія", "галицький лев", "greenville", "грінвіл", "quoroom", "квороом", "кворум",
+         "well home", "вел хоум", "continent", "континент"]
+TG_SKIP = ["шукаю", "шукає", "шукаємо", "зніму", "винайму", "подобово", "продаж", "продам"]
+
+
+def tg_price_usd(text: str) -> int | None:
+    t = text.lower().replace("\xa0", " ")
+    m = re.search(r"(\d[\d ]{2,6})\s*(?:\$|дол|usd|у\.?\s?о\.?)", t)
+    if m:
+        v = int(re.sub(r"\D", "", m.group(1)))
+        if 200 <= v <= 3000:
+            return v
+    m = re.search(r"(\d[\d ]{3,7})\s*(?:грн|гривен|uah|₴)", t)
+    if m:
+        v = int(re.sub(r"\D", "", m.group(1)))
+        if 5000 <= v <= 100000:
+            return round(v / UAH_PER_USD)
+    m = re.search(r"(\d[\d ]{2,6})\s*(?:€|євро|eur)", t)
+    if m:
+        v = int(re.sub(r"\D", "", m.group(1)))
+        if 200 <= v <= 3000:
+            return round(v * USD_PER_EUR)
+    return None
+
+
+def tg_one_room(text: str) -> bool:
+    t = text.lower()
+    return bool(re.search(r"\b1[\s-]*(?:но)?[\s-]*кім|однокімнат|1к\b|1-к\b|смарт|studio|студі", t))
+
+
+def scan_tg(seen: set, found: list) -> None:
+    for ch in TG_CHANNELS:
+        before, total = None, 0
+        for _ in range(TG_MAX_PAGES):
+            url = f"https://t.me/s/{ch}" + (f"?before={before}" if before else "")
+            html = fetch(url)
+            time.sleep(3)
+            if not html:
+                break
+            soup = BeautifulSoup(html, "html.parser")
+            posts = soup.select(".tgme_widget_message[data-post]")
+            if not posts:
+                break
+            ids = []
+            all_seen = True
+            for p in posts:
+                post = p["data-post"]
+                num = int(post.split("/")[-1])
+                ids.append(num)
+                key = "tg:" + post
+                if key in seen:
+                    continue
+                all_seen = False
+                seen.add(key)
+                total += 1
+                t_el = p.select_one(".tgme_widget_message_text")
+                text = t_el.get_text("\n") if t_el else ""
+                low = text.lower()
+                if any(w in low for w in TG_SKIP) or any(w in low for w in EXCLUDE_WORDS):
+                    continue
+                if not tg_one_room(text):
+                    continue
+                if not (on_my_street(text) or any(z in low for z in TG_ZK)):
+                    continue
+                usd = tg_price_usd(text)
+                if usd is None or not (MIN_USD <= usd <= MAX_USD):
+                    continue
+                first = next((ln.strip() for ln in text.split("\n") if ln.strip()), "")[:120]
+                found.append({
+                    "id": key, "url": f"https://t.me/{post}", "complex": "TG", "text": text,
+                    "usd": usd, "price_raw": f"≈${usd}", "area": "?", "floor": "?",
+                    "street": first, "no_fee": "без комісії" in low,
+                    "owner": "від власника" in low or "власник" in low and "від ан" not in low,
+                    "site": f"@{ch}",
+                })
+            if all_seen or not ids:
+                break
+            before = min(ids)
+        print(f"Телеграм @{ch}: {total} нових постів")
+
+
 def main() -> None:
     seen = set(json.loads(SEEN_FILE.read_text())) if SEEN_FILE.exists() else set()
     first_run = not seen
@@ -321,6 +412,7 @@ def main() -> None:
     print(f"Загальний список: {len(city_ids)} оголошень")
 
     scan_lun(seen, found)
+    scan_tg(seen, found)
 
     found.sort(key=lambda x: (not x["no_fee"], x["usd"]))
     if first_run and found:
