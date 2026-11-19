@@ -151,11 +151,20 @@ def main() -> None:
     first_run = not seen
     found = []
     for name, cid in COMPLEXES.items():
-        html = fetch(complex_url(name, cid))
-        time.sleep(6)                      # пауза, щоб не отримати 429
-        if not html:
-            continue
-        items = parse(html, name)
+        items, ids = [], set()
+        for page in range(1, 4):           # сайт сортує не за датою, тому до 3 сторінок
+            url = complex_url(name, cid) + (f"?page={page}" if page > 1 else "")
+            html = fetch(url)
+            time.sleep(6)                  # пауза, щоб не отримати 429
+            if not html:
+                break
+            new = [it for it in parse(html, name) if it["id"] not in ids]
+            if not new:
+                break
+            ids.update(it["id"] for it in new)
+            items += new
+            if len(new) < 20:
+                break
         print(f"{name}: {len(items)} оголошень")
         for it in items:
             if it["id"] in seen:
