@@ -14,5 +14,9 @@
  "Телеграм @orendakvartyr_ua": {
   "fails": 0,
   "alerted": false
+ },
+ "бот": {
+  "fails": 1,
+  "alerted": false
  }
 }
