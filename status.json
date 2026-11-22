@@ -4,8 +4,8 @@
   "alerted": false
  },
  "rieltor (вулиці)": {
-  "fails": 5,
-  "alerted": true
+  "fails": 0,
+  "alerted": false
  },
  "ЛУН": {
   "fails": 0,
