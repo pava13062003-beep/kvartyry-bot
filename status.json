@@ -1,14 +1,14 @@
 {
  "rieltor (ЖК)": {
-  "fails": 1,
+  "fails": 0,
   "alerted": false
  },
  "rieltor (вулиці)": {
-  "fails": 1,
+  "fails": 0,
   "alerted": false
  },
  "ЛУН": {
-  "fails": 0,
+  "fails": 1,
   "alerted": false
  },
  "Телеграм @orendakvartyr_ua": {
