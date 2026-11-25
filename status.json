@@ -1,11 +1,11 @@
 {
  "rieltor (ЖК)": {
-  "fails": 2,
-  "alerted": true
+  "fails": 0,
+  "alerted": false
  },
  "rieltor (вулиці)": {
-  "fails": 12,
-  "alerted": true
+  "fails": 0,
+  "alerted": false
  },
  "ЛУН": {
   "fails": 0,
