@@ -16,7 +16,7 @@
   "alerted": false
  },
  "бот": {
-  "fails": 5,
+  "fails": 6,
   "alerted": true
  }
 }
